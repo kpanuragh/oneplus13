@@ -235,6 +235,33 @@ class QcomFwTest(unittest.TestCase):
             self.assertEqual([qcom_fw.Elf.seg_kind(p) for p in elf.phdrs], ["PHDR", "HASH", ""])
             self.assertIn("QC_IMAGE_VERSION_STRING=ADSP.TEST.1.0", qcom_fw.version_strings(data))
 
+    def _elf_with_hash_seg(self, hash_seg):
+        """ELF64 whose second phdr is a HASH segment holding `hash_seg`."""
+        ehdr = (b"\x7fELF\x02\x01\x01" + b"\0" * 9 +
+                struct.pack("<HHIQQQIHHHHHH", 2, 183, 1, 0, 64, 0, 0, 64, 56, 2, 0, 0, 0))
+        off = 0x1000
+        phdrs = (struct.pack("<IIQQQQQQ", 0, 7 << 24, 0, 0, 0, 176, 0, 0) +
+                 struct.pack("<IIQQQQQQ", 0, 2 << 24, off, 0, 0, len(hash_seg), 0, 0x1000))
+        data = (ehdr + phdrs).ljust(off, b"\0") + hash_seg
+        return data, qcom_fw.Elf(data)
+
+    def test_rollback_v7(self):
+        qti = struct.pack("<3I", 2, 0, 1).ljust(224, b"\0")
+        oem = struct.pack("<3I", 2, 0, 4).ljust(224, b"\0")
+        hdr = struct.pack("<16I", 0, 7, 24, len(qti), len(oem), 0, 0, 0, 0, 0,
+                          0, 0, 0x1c, 0, 3, 0)
+        data, elf = self._elf_with_hash_seg(hdr + qti + oem)
+        rb = qcom_fw.rollback_info(data, elf)
+        self.assertEqual((rb["mbn_version"], rb["sw_id"], rb["arb"], rb["arb_qti"]),
+                         (7, 0x1c, 4, 1))
+
+    def test_rollback_v5_cert(self):
+        hdr = struct.pack("<10I", 0, 5, 0, 0, 0, 0, 0, 0, 0, 0)
+        cert = b"\x30\x82....01 0000000300000009 SW_ID....02 0000000000000000 HW_ID"
+        data, elf = self._elf_with_hash_seg(hdr + cert)
+        rb = qcom_fw.rollback_info(data, elf)
+        self.assertEqual((rb["mbn_version"], rb["sw_id"], rb["arb"]), (5, 9, 3))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,10 @@
 ## Before touching the phone
 
 1. Back up anything you care about.
-2. Keep the **full OTA zip of the exact build that is installed**. Its
+2. Keep the **full OTA zip of the exact build that is installed**, and
+   replace it after every update. Never restore from an older build:
+   anti-rollback fuses make downgrades brick the phone
+   ([anti-rollback.md](anti-rollback.md)). Its
    images (`boot`, `vendor_boot`, `dtbo`, `init_boot`, `vbmeta`) are your
    restore set: `scripts/extract-firmware.sh` puts them in `out/images/`.
 3. Install current `platform-tools` (adb/fastboot).
@@ -74,14 +77,18 @@ afterwards, or use the UART test pads (uart7, 115200 8N1) if you have them.
   in from Android is not readable from Linux. That is why there is no
   "image file on /data" option.
 * Boot Linux: `fastboot set_active b`. Back to Android: `fastboot set_active a`.
+  **Check anti-rollback first.** After any OTA, the other slot carries the
+  previous build's bootloaders. If that OTA raised the ARB fuse, switching
+  slots hard-bricks the phone. Compare both slots with
+  `scripts/dump-live-device.sh` and read [anti-rollback.md](anti-rollback.md).
 
 ## Recovery
 
 | Situation | Fix |
 |---|---|
 | Mainline hangs | Force reboot (Power + Vol−, ~10 s), then hold Vol− while booting to reach fastboot |
-| Slot b broken | `fastboot set_active a` |
-| Android won't boot after experiments | Re-flash `boot`, `init_boot`, `vendor_boot`, `dtbo`, `vbmeta` from `out/images/` to the affected slot |
+| Slot b broken | `fastboot set_active a`, but only if slot a's boot-chain ARB ≥ slot b's ([anti-rollback.md](anti-rollback.md)) |
+| Android won't boot after experiments | Re-flash `boot`, `init_boot`, `vendor_boot`, `dtbo`, `vbmeta` from `out/images/` to the affected slot. They must come from the **currently installed** build; never use an older OTA |
 | No fastboot at all | Qualcomm EDL (9008) mode with OnePlus's MSM Download Tool / signed firehose. That needs an authorised account for this generation, so **do not end up here**: never flash `xbl*`, `abl`, `tz`, `hyp`, `aop`, `devcfg` or `uefi`. |
 
 **Never run `fastboot flashing lock` with a non-stock image installed.**

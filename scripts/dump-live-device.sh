@@ -51,6 +51,23 @@ rsh 'for p in /dev/block/by-name/*; do n=$(basename $p); s=$(blockdev --getsize6
     > "$OUT/partition-sizes.txt"
 rsh 'cat /proc/partitions' > "$OUT/proc-partitions.txt"
 
+log "boot-chain anti-rollback versions, both slots (needs root)"
+# Read-only copies of the signed boot chain, so tools/qcom_fw.py can report
+# the ARB version of each slot. Compare slots before ever using set_active.
+if [ -n "$SU" ] || [ "$(sh_ id -u)" = "0" ]; then
+    mkdir -p "$OUT/bootchain"
+    for p in xbl xbl_config abl tz hyp aop devcfg uefi; do
+        for slot in _a _b; do
+            [ -n "$(sh_ "ls /dev/block/by-name/$p$slot 2>/dev/null")" ] || continue
+            pull_root "/dev/block/by-name/$p$slot" "$OUT/bootchain/$p$slot.img"
+        done
+    done
+    if ls "$OUT"/bootchain/*.img >/dev/null 2>&1; then
+        python3 "$(dirname "$0")/../tools/qcom_fw.py" arb "$OUT"/bootchain/*.img \
+            | tee "$OUT/anti-rollback.txt"
+    fi
+fi
+
 log "kernel and modules"
 sh_ 'uname -a' > "$OUT/uname.txt"
 rsh 'cat /proc/cmdline' > "$OUT/cmdline.txt"

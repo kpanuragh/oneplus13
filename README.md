@@ -37,7 +37,7 @@ The repository has two halves:
 tools/        Python 3 stdlib-only tools
   payload_extract.py   OTA payload.bin (or the OTA zip directly) → partition images
   bootimg.py           boot v0–4 / vendor_boot v3–4 / dtbo unpack; header-v2 pack
-  qcom_fw.py           Qualcomm MBN/MDT info, .mdt+.bNN → .mbn squash, version scan
+  qcom_fw.py           Qualcomm MBN/MDT info, .mdt+.bNN → .mbn squash, version and anti-rollback scan
   fdt.py               DTB/DTBO parser, decompiler, carver
   dt_survey.py         downstream DTB/overlays → device inventory with resolved GPIOs
 scripts/
@@ -50,7 +50,7 @@ scripts/
 dts/          sm8750-oneplus-dodge.dts (+ regulators dtsi)
 kernel/       dodge.config, a fragment on top of arm64 defconfig
 initramfs/    init script for the debug initramfs
-docs/         hardware map, boot chain, firmware RE, flashing/recovery, roadmap
+docs/         hardware map, boot chain, firmware RE, flashing/recovery, anti-rollback, roadmap
 tests/        unit tests with synthetic images
 ```
 
@@ -76,8 +76,9 @@ adb reboot bootloader && fastboot boot out/boot-mainline.img
 telnet 172.16.42.1        # once the USB NCM link comes up
 ```
 
-Read [docs/flashing.md](docs/flashing.md) **before** unlocking or flashing
-anything. It covers the A/B-slot approach that keeps Android bootable and
+Read [docs/flashing.md](docs/flashing.md) and
+[docs/anti-rollback.md](docs/anti-rollback.md) **before** unlocking or
+flashing anything. It covers the A/B-slot approach that keeps Android bootable and
 the partitions you must never write.
 
 ## Development

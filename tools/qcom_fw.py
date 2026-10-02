@@ -9,6 +9,7 @@ partitions. This tool converts between the two and reports what an image is.
     python3 tools/qcom_fw.py info   adsp.mdt            # segments, hash seg, version strings
     python3 tools/qcom_fw.py squash adsp.mdt adsp.mbn   # .mdt + .bNN -> single .mbn
     python3 tools/qcom_fw.py scan   firmware_dir/       # summarise every image in a tree
+    python3 tools/qcom_fw.py arb    xbl.img abl.img ... # anti-rollback (ARB) versions
 
 The images keep their signatures. Squashing only rearranges bytes; it never
 re-signs anything, and the device still verifies each image in TrustZone.
@@ -92,6 +93,53 @@ def load_full_image(path):
     return bytes(out), elf
 
 
+SW_ID_OU_RE = re.compile(rb"01 ([0-9A-Fa-f]{16}) SW_ID")
+
+
+def rollback_info(data, elf):
+    """Read the anti-rollback version from an image's hash segment.
+
+    Layouts (from coreboot util/qualcomm/mbn_tools.py and qtestsign):
+      * MBN v3/v5: no metadata. The attestation certificate carries an OU
+        field "01 <16 hex> SW_ID", whose upper 32 bits are the rollback
+        version and lower 32 bits the software ID.
+      * MBN v7: a 16-word header (10 header words + 6 words of common
+        metadata, word 12 = software_id), then the QTI metadata and the OEM
+        metadata. Each metadata block starts with major, minor,
+        anti_rollback_version.
+    Returns a dict, or None when the image has no recognisable hash segment.
+    """
+    for ph in elf.phdrs:
+        if Elf.seg_kind(ph) != "HASH":
+            continue
+        seg = data[ph["offset"]:ph["offset"] + ph["filesz"]]
+        if len(seg) < 40:
+            return None
+        version = struct.unpack_from("<I", seg, 4)[0]
+        info = {"mbn_version": version}
+        if version in (3, 5):
+            m = SW_ID_OU_RE.search(seg)
+            if m:
+                v = int(m.group(1), 16)
+                info.update(sw_id=v & 0xFFFFFFFF, arb=v >> 32, source="cert SW_ID")
+            return info
+        if version == 7 and len(seg) >= 64:
+            w = struct.unpack_from("<16I", seg, 0)
+            meta_qti, meta_oem = w[3], w[4]
+            info["sw_id"] = w[12]
+            off = 64
+            if meta_qti >= 12:
+                info["arb_qti"] = struct.unpack_from("<I", seg, off + 8)[0]
+            off += meta_qti
+            if meta_oem >= 12:
+                major, minor, arb = struct.unpack_from("<3I", seg, off)
+                info.update(arb=arb, metadata="%d.%d" % (major, minor), source="OEM metadata")
+            return info
+        info["source"] = "unsupported MBN header version"
+        return info
+    return None
+
+
 def version_strings(data):
     seen = []
     for m in VERSION_RE.finditer(data):
@@ -114,9 +162,39 @@ def cmd_info(path):
             certs = seg.count(b"\x30\x82")
             print("  hash segment: %d bytes, ~%d DER objects (signature + cert chain)" % (
                 len(seg), certs))
+    rb = rollback_info(data, elf)
+    if rb:
+        print("  anti-rollback: %s" % _fmt_rollback(rb))
     for s in version_strings(data):
         print("  " + s)
     return 0
+
+
+def _fmt_rollback(rb):
+    parts = ["mbn v%d" % rb["mbn_version"]]
+    if "sw_id" in rb:
+        parts.append("sw_id=0x%x" % rb["sw_id"])
+    if "arb" in rb:
+        parts.append("ARB=%d" % rb["arb"])
+    if "arb_qti" in rb:
+        parts.append("QTI-ARB=%d" % rb["arb_qti"])
+    parts.append("(%s)" % rb.get("source", "?"))
+    return " ".join(parts)
+
+
+def cmd_arb(paths):
+    """Print the anti-rollback version of each boot-chain image."""
+    rc = 0
+    for p in paths:
+        try:
+            data, elf = load_full_image(p)
+            rb = rollback_info(data, elf)
+        except (ValueError, FileNotFoundError, struct.error) as e:
+            print("%-28s ERROR %s" % (os.path.basename(p), e))
+            rc = 1
+            continue
+        print("%-28s %s" % (os.path.basename(p), _fmt_rollback(rb) if rb else "no hash segment"))
+    return rc
 
 
 def cmd_squash(src, dst):
@@ -151,6 +229,8 @@ def main(argv):
         return cmd_squash(argv[2], argv[3])
     if len(argv) >= 3 and argv[1] == "scan":
         return cmd_scan(argv[2])
+    if len(argv) >= 3 and argv[1] == "arb":
+        return cmd_arb(argv[2:])
     print(__doc__)
     return 1
 

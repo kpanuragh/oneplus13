@@ -131,6 +131,16 @@ find "$OUT/firmware/raw" -iname '*.mbn' -print0 |
 log "writing reports"
 "$PY" "$TOOLS/qcom_fw.py" scan "$OUT/firmware/raw" > "$OUT/report/firmware-versions.txt" || true
 "$PY" "$TOOLS/qcom_fw.py" scan "$FW_DIR" > "$OUT/report/firmware-squashed.txt" || true
+# Anti-rollback versions of the signed boot chain. Never flash images whose
+# ARB is lower than what the phone has fused (see docs/anti-rollback.md).
+arb_imgs=()
+for i in xbl xbl_config abl tz hyp aop aop_config devcfg uefi uefisecapp imagefv keymaster \
+         qupfw cpucp shrm featenabler; do
+    [ -f "$OUT/images/$i.img" ] && arb_imgs+=("$OUT/images/$i.img")
+done
+if [ ${#arb_imgs[@]} -gt 0 ]; then
+    "$PY" "$TOOLS/qcom_fw.py" arb "${arb_imgs[@]}" | tee "$OUT/report/anti-rollback.txt" || true
+fi
 for i in boot xbl abl tz hyp aop; do
     [ -f "$OUT/images/$i.img" ] || continue
     strings -n 8 "$OUT/images/$i.img" | grep -E 'IMAGE_VERSION_STRING|OEM_IMAGE|Build|BOOT\.' \
