@@ -1,0 +1,131 @@
+#!/bin/busybox sh
+# OnePlus 13 bring-up initramfs.
+#
+# Brings up a USB gadget (NCM ethernet + ACM serial) and starts a telnet
+# shell, so a host can reach the phone with:
+#     ip addr add 172.16.42.2/24 dev <usb0>; telnet 172.16.42.1
+# or over the serial gadget: picocom /dev/ttyACM0
+#
+# Kernel cmdline knobs:
+#   dodge.root=<dev>   switch_root into this rootfs instead of staying here;
+#                      /dev/sdaN, PARTLABEL=userdata, LABEL=..., UUID=...
+#   dodge.wait=<sec>   seconds to wait for the root device (default 10)
+
+/bin/busybox --install -s /bin
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+mkdir -p /proc /sys /dev /tmp /run /sys/kernel/config /sys/kernel/debug
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+mount -t configfs configfs /sys/kernel/config
+mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+mount -t tmpfs tmpfs /tmp
+
+log() { echo "[dodge-init] $*" | tee /dev/kmsg > /dev/tty0 2>/dev/null; }
+
+# Resolve PARTLABEL=/LABEL=/UUID=/plain paths to a block device node.
+# busybox findfs has no PARTLABEL support, so read PARTNAME from sysfs.
+resolve_dev() {
+    case "$1" in
+        PARTLABEL=*)
+            for u in /sys/class/block/*/uevent; do
+                if grep -qx "PARTNAME=${1#PARTLABEL=}" "$u"; then
+                    echo "/dev/$(basename "$(dirname "$u")")"
+                    return
+                fi
+            done ;;
+        LABEL=*|UUID=*) findfs "$1" 2>/dev/null ;;
+        *) [ -b "$1" ] && echo "$1" ;;
+    esac
+}
+
+cmdline_arg() {
+    for a in $(cat /proc/cmdline); do
+        case "$a" in "$1"=*) echo "${a#*=}"; return ;; esac
+    done
+}
+
+log "kernel $(uname -r) up"
+
+# Load modules (pmic-glink, remoteproc, ...) when they are shipped in the image.
+if [ -d "/lib/modules/$(uname -r)" ]; then
+    for m in qcom_q6v5_pas qrtr qrtr-smd pmic_glink pmic_glink_altmode qcom_battmgr ucsi_glink; do
+        modprobe "$m" 2>/dev/null
+    done
+fi
+
+# ---------------------------------------------------------------- USB gadget
+setup_gadget() {
+    local udc g=/sys/kernel/config/usb_gadget/g1
+    for _ in $(seq 1 50); do
+        udc=$(ls /sys/class/udc 2>/dev/null | head -n1)
+        [ -n "$udc" ] && break
+        sleep 0.2
+    done
+    if [ -z "$udc" ]; then
+        log "no USB device controller found"
+        return 1
+    fi
+    mkdir -p "$g" && cd "$g" || return 1
+    echo 0x18d1 > idVendor          # Google
+    echo 0xd001 > idProduct         # generic debug gadget id
+    mkdir -p strings/0x409
+    echo "OnePlus" > strings/0x409/manufacturer
+    echo "OnePlus 13 (mainline bring-up)" > strings/0x409/product
+    echo "dodge-$(cat /proc/sys/kernel/random/boot_id | cut -c1-8)" > strings/0x409/serialnumber
+
+    mkdir -p functions/ncm.usb0 functions/acm.usb0 configs/c.1/strings/0x409
+    echo "NCM+ACM" > configs/c.1/strings/0x409/configuration
+    ln -s functions/ncm.usb0 configs/c.1/ 2>/dev/null
+    ln -s functions/acm.usb0 configs/c.1/ 2>/dev/null
+    echo "$udc" > UDC
+    cd /
+    log "USB gadget bound to $udc"
+
+    for _ in $(seq 1 25); do
+        ip link show usb0 >/dev/null 2>&1 && break
+        sleep 0.2
+    done
+    ip addr add 172.16.42.1/24 dev usb0 2>/dev/null
+    ip link set usb0 up 2>/dev/null
+    # Hand the host an address so it does not need manual setup.
+    mkdir -p /var/lib/misc && touch /var/lib/misc/udhcpd.leases
+    cat > /etc/udhcpd.conf <<EOF
+start 172.16.42.2
+end 172.16.42.2
+interface usb0
+option subnet 255.255.255.0
+EOF
+    udhcpd /etc/udhcpd.conf 2>/dev/null
+}
+
+setup_gadget
+telnetd -b 172.16.42.1:23 -l /bin/sh 2>/dev/null && log "telnet on 172.16.42.1:23"
+# Login shell on the serial gadget as well.
+( while true; do [ -e /dev/ttyGS0 ] && setsid -c sh -l </dev/ttyGS0 >/dev/ttyGS0 2>&1; sleep 1; done ) &
+
+# ---------------------------------------------------------- optional rootfs
+ROOT="$(cmdline_arg dodge.root)"
+if [ -n "$ROOT" ]; then
+    WAIT="$(cmdline_arg dodge.wait)"; WAIT="${WAIT:-10}"
+    log "waiting up to ${WAIT}s for $ROOT"
+    for _ in $(seq 1 $((WAIT * 5))); do
+        DEV="$(resolve_dev "$ROOT")"
+        [ -n "$DEV" ] && break
+        sleep 0.2
+    done
+    if [ -n "$DEV" ] && mkdir -p /newroot && mount "$DEV" /newroot; then
+        log "switching to $DEV"
+        killall telnetd udhcpd 2>/dev/null
+        umount /sys/kernel/config /sys/kernel/debug /dev/pts /tmp 2>/dev/null
+        exec switch_root /newroot /sbin/init
+    fi
+    log "could not mount $ROOT; staying in the initramfs"
+fi
+
+log "debug shell ready (tty0 / telnet / ttyGS0)"
+while true; do
+    setsid -c sh -l </dev/tty0 >/dev/tty0 2>&1 || sleep 5
+done
